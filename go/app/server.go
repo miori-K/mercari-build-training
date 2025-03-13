@@ -2,7 +2,9 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -39,9 +41,21 @@ func (s Server) Run() int {
 	}
 
 	// STEP 5-1: set up the database connection
+	dbPath, found := os.LookupEnv("DB_PATH")
+	if !found {
+		dbPath = "./data.db"
+	}
+
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		slog.Error("failed to open database: ", "error", err)
+		return 1
+	}
+	defer db.Close()
+
+	itemRepo := NewItemRepository()
 
 	// set up handlers
-	itemRepo := NewItemRepository()
 	h := &Handlers{imgDirPath: s.ImageDirPath, itemRepo: itemRepo}
 
 	// set up routes
@@ -51,16 +65,24 @@ func (s Server) Run() int {
 	mux.HandleFunc("POST /items", h.AddItem)
 	mux.HandleFunc("GET /images/{filename}", h.GetImage)
 	mux.HandleFunc("GET /items/", h.GetID)
+	mux.HandleFunc("GET /search", func(w http.ResponseWriter, r *http.Request) {
+		searchItems(w, r, itemRepo)
+	})
+
+	allowedOrigin := "*"
+	methods := []string{"GET", "POST", "OPTIONS"}
+	simpleCORSMiddleware(mux, allowedOrigin, methods)
 
 	// start the server
 	slog.Info("http server started on", "port", s.Port)
-	err := http.ListenAndServe(":"+s.Port, simpleCORSMiddleware(simpleLoggerMiddleware(mux), frontURL, []string{"GET", "HEAD", "POST", "OPTIONS"}))
+	err = http.ListenAndServe(":"+s.Port, simpleCORSMiddleware(simpleLoggerMiddleware(mux), frontURL, []string{"GET", "HEAD", "POST", "OPTIONS"}))
 	if err != nil {
 		slog.Error("failed to start server: ", "error", err)
 		return 1
 	}
 
 	return 0
+
 }
 
 type Handlers struct {
@@ -228,8 +250,9 @@ func (s *Handlers) storeImage(image []byte) (filePath string, err error) {
 		return "", err
 	}
 
-	hex.EncodeToString(hash.Sum(nil))
-	fileName := fmt.Sprintf("%x.jpg", hash.Sum(nil))
+	hashBytes := hash.Sum(nil)
+	hashStr := hex.EncodeToString(hashBytes)
+	fileName := fmt.Sprintf("%s.jpg", hashStr)
 	filePath = filepath.Join(s.imgDirPath, fileName)
 
 	if _, err := os.Stat(filePath); err == nil {
@@ -258,8 +281,9 @@ type GetImageRequest struct {
 
 // parseGetImageRequest parses and validates the request to get an image.
 func parseGetImageRequest(r *http.Request) (*GetImageRequest, error) {
+	fileName := strings.TrimPrefix(r.URL.Path, "/images/")
 	req := &GetImageRequest{
-		FileName: r.PathValue("filename"), // from path parameter
+		FileName: fileName,
 	}
 
 	// validate the request
@@ -361,4 +385,24 @@ func (s *Handlers) GetID(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func searchItems(w http.ResponseWriter, r *http.Request, repo ItemRepository) {
+	ctx := context.Background()
+	keyword := r.URL.Query().Get("keyword")
+	if keyword == "" {
+		http.Error(w, "error", http.StatusBadRequest)
+		return
+	}
+
+	items, err := repo.SearchItems(ctx, keyword)
+	if err != nil {
+		http.Error(w, "error", http.StatusInternalServerError)
+		return
+	}
+
+	fmt.Println("検索結果:", items)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(items)
 }

@@ -29,13 +29,6 @@ func TestParseAddItemRequest(t *testing.T) {
 				"name":     "", // fill here
 				"category": "", // fill here
 			},
-			wants: wants{
-				req: &AddItemRequest{
-					Name: "", // fill here
-					Category: "", // fill here
-				},
-				err: false,
-			},
 		},
 		"ng: empty request": {
 			args: map[string]string{},

@@ -3,24 +3,26 @@ package app
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+
 	// STEP 5-1: uncomment this line
-	// _ "github.com/mattn/go-sqlite3"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 var errImageNotFound = errors.New("image not found")
+var db *sql.DB
 
 type Item struct {
 	ID       int    `db:"id" json:"-"`
 	Name     string `db:"name" json:"name"`
 	Category string `db:"category" json:"category"`
-	Image    string `json:"image"`
+	Image    string `db:"image" json:"image"`
 }
 
 // Please run `go generate ./...` to generate the mock implementation
@@ -31,106 +33,105 @@ type ItemRepository interface {
 	Insert(ctx context.Context, item *Item) error
 	GetItems(ctx context.Context) ([]Item, error)
 	GetItemID(ctx context.Context, itemID int) (Item, error)
+	SearchItems(ctx context.Context, keyword string) ([]Item, error)
 }
 
 func (i *itemRepository) GetItemID(ctx context.Context, itemID int) (Item, error) {
-	file, err := os.Open("items.json")
+	var item Item
+	err := i.db.QueryRowContext(ctx, "SELECT id, name, category, image_name FROM items WHERE id = ?", itemID).
+		Scan(&item.ID, &item.Name, &item.Category, &item.Image)
 
 	if err != nil {
-		return Item{}, fmt.Errorf("failed to open items file: %w", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			return Item{}, fmt.Errorf("item not found: %w", err)
+		}
+		return Item{}, fmt.Errorf("failed to retrieve item: %w", err)
 	}
-	defer file.Close()
-
-	var data struct {
-		Items []Item `json:"items"`
-	}
-
-	decoder := json.NewDecoder(file)
-	if err := decoder.Decode(&data); err != nil {
-		return Item{}, fmt.Errorf("failed to parse items JSON: %w", err)
-	}
-
-	return data.Items[itemID], nil
+	return item, nil
 }
 
-func (i *itemRepository) GetItems(ctx context.Context) ([]Item, error) {
-	var data struct {
-		Items []Item `json:"items"`
-	}
-
-	if _, err := os.Stat(i.fileName); os.IsNotExist(err) {
-		return []Item{}, nil
-	}
-
-	file, err := os.ReadFile(i.fileName)
+func (i *itemRepository) Insert(ctx context.Context, item *Item) error {
+	_, err := i.db.ExecContext(ctx, `
+		INSERT INTO items (name, category, image_name) VALUES (?, ?, ?)
+	`, item.Name, item.Category, item.Image)
 	if err != nil {
-		log.Println("error:", err)
-		return nil, err
+		return fmt.Errorf("failed to insert item: %w", err)
 	}
-
-	err = json.Unmarshal(file, &data)
-	if err != nil {
-		log.Println("error:", err)
-		return nil, err
-	}
-
-	return data.Items, nil
+	return nil
 }
 
 // itemRepository is an implementation of ItemRepository
 type itemRepository struct {
 	// fileName is the path to the JSON file storing items.
 	fileName string
+	db       *sql.DB
+}
+
+// GetItems implements ItemRepository.
+func (i *itemRepository) GetItems(ctx context.Context) ([]Item, error) {
+	rows, err := i.db.QueryContext(ctx, "SELECT id, name, category, image_name FROM items")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get items from database: %w", err)
+	}
+	defer rows.Close()
+
+	var items []Item
+	for rows.Next() {
+		var item Item
+		if err := rows.Scan(&item.ID, &item.Name, &item.Category, &item.Image); err != nil {
+			return nil, fmt.Errorf("failed to scan item: %w", err)
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func (i *itemRepository) SearchItems(ctx context.Context, keyword string) ([]Item, error) {
+	query := `
+		SELECT id, name, category, image_name 
+		FROM items 
+		WHERE name LIKE ? OR category LIKE ?
+	`
+	rows, err := i.db.QueryContext(ctx, query, "%"+keyword+"%", "%"+keyword+"%")
+	if err != nil {
+		return nil, fmt.Errorf("failed to search items from database: %w", err)
+	}
+	defer rows.Close()
+
+	var items []Item
+	for rows.Next() {
+		var item Item
+		if err := rows.Scan(&item.ID, &item.Name, &item.Category, &item.Image); err != nil {
+			return nil, fmt.Errorf("failed to scan item: %w", err)
+		}
+		items = append(items, item)
+	}
+	return items, nil
 }
 
 // NewItemRepository creates a new itemRepository.
+
 func NewItemRepository() ItemRepository {
-	return &itemRepository{fileName: "items.json"}
-}
-
-// Insert inserts an item into the repository.
-func (i *itemRepository) Insert(ctx context.Context, item *Item) error {
-	// STEP 4-1: add an implementation to store an item
-	var data struct {
-		Items []Item `json:"items"`
+	dbPath, found := os.LookupEnv("DB_PATH")
+	if !found {
+		dbPath = "db/mercari.sqlite3"
 	}
 
-	if _, err := os.Stat(i.fileName); err == nil {
-		file, err := os.ReadFile(i.fileName)
-		if err != nil {
-			log.Println("error:", err)
-			return err
-		}
-		json.Unmarshal(file, &data)
-	}
-
-	data.Items = append(data.Items, *item)
-
-	jsonData, err := json.MarshalIndent(data, "", "  ")
+	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
-		log.Println("error:", err)
-		return err
+		log.Fatalf("failed to connect to SQLite: %v", err)
 	}
 
-	err = os.WriteFile(i.fileName, jsonData, 0666)
-	if err != nil {
-		log.Println("error:", err)
-		return err
-	}
-
-	return nil
+	return &itemRepository{db: db}
 }
 
 // StoreImage stores an image and returns an error if any.
 // This package doesn't have a related interface for simplicity.
 func StoreImage(fileName string, image []byte) error {
-	// STEP 4-4: add an implementation to store an image
-
 	imageDir := "images"
 
 	if _, err := os.Stat(imageDir); os.IsNotExist(err) {
-		err := os.MkdirAll(imageDir, os.ModePerm)
-		if err != nil {
+		if err := os.MkdirAll(imageDir, 0755); err != nil {
 			return err
 		}
 	}
@@ -139,6 +140,11 @@ func StoreImage(fileName string, image []byte) error {
 	hashString := hex.EncodeToString(hash[:])
 
 	filePath := filepath.Join(imageDir, hashString+".jpg")
+
+	if _, err := os.Stat(filePath); err == nil {
+		// すでに存在する場合は成功扱い（何もエラーを返さない）
+		return nil
+	}
 
 	err := os.WriteFile(filePath, image, 0666)
 	if err != nil {
