@@ -20,7 +20,7 @@ type Item struct {
 	ID       int    `db:"id" json:"-"`
 	Name     string `db:"name" json:"name"`
 	Category string `db:"category" json:"category"`
-	Image    string `json:"image"`
+	Image    string `db:"image"`
 }
 
 // Please run `go generate ./...` to generate the mock implementation
