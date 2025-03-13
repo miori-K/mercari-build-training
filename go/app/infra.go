@@ -48,7 +48,7 @@ func (i *itemRepository) GetItemID(ctx context.Context, itemID int) (Item, error
 	decoder := json.NewDecoder(file)
 	if err := decoder.Decode(&data); err != nil {
 		return Item{}, fmt.Errorf("failed to parse items JSON: %w", err)
-	}
+	}//return nilにしたらエラーになったのでItem{}のままです
 
 	return data.Items[itemID], nil
 }
