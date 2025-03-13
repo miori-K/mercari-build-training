@@ -129,7 +129,7 @@ func StoreImage(fileName string, image []byte) error {
 	imageDir := "images"
 
 	if _, err := os.Stat(imageDir); os.IsNotExist(err) {
-		err := os.MkdirAll(imageDir, os.ModePerm)
+		err := os.MkdirAll(imageDir, 755)
 		if err != nil {
 			return err
 		}
